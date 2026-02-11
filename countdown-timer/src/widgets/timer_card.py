@@ -1,18 +1,67 @@
 """
-倒计时卡片组件
+倒计时卡片组件 - 增强版拖拽效果
 """
 from PyQt6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QLabel, 
-    QPushButton, QFrame, QSizePolicy
+    QWidget, QHBoxLayout, QVBoxLayout, QLabel,
+    QPushButton, QFrame, QSizePolicy, QGraphicsDropShadowEffect
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QMimeData, QPoint
-from PyQt6.QtGui import QFont, QPainter, QColor, QPen, QBrush, QDrag, QPixmap
+from PyQt6.QtCore import (
+    Qt, pyqtSignal, QTimer, QMimeData, QPoint,
+    QPropertyAnimation, QEasingCurve, QVariantAnimation, QRect, QSize
+)
+from PyQt6.QtGui import QFont, QPainter, QColor, QPen, QBrush, QDrag, QPixmap, QPainterPath
 
 from models import Timer
 
 
+class PlaceholderCard(QFrame):
+    """拖拽占位符卡片 - 半透明效果"""
+    
+    def __init__(self, color: str, parent=None):
+        super().__init__(parent)
+        self._color = color
+        self.setFixedHeight(90)
+        self.setStyleSheet(f"""
+            PlaceholderCard {{
+                background-color: {color};
+                border: 2px dashed rgba(0, 0, 0, 0.3);
+                border-radius: 12px;
+                opacity: 0.3;
+            }}
+        """)
+    
+    def set_color(self, color: str):
+        """设置占位符颜色"""
+        self._color = color
+        self.setStyleSheet(f"""
+            PlaceholderCard {{
+                background-color: {color};
+                border: 2px dashed rgba(0, 0, 0, 0.3);
+                border-radius: 12px;
+                opacity: 0.3;
+            }}
+        """)
+    
+    def paintEvent(self, event):
+        """绘制半透明效果"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # 半透明填充
+        color = QColor(self._color)
+        color.setAlpha(60)
+        painter.fillRect(self.rect(), color)
+        
+        # 虚线边框
+        pen = QPen(QColor(0, 0, 0, 80))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 12, 12)
+
+
 class TimerCard(QFrame):
-    """倒计时卡片组件"""
+    """倒计时卡片组件 - 带增强拖拽效果"""
     
     # 信号定义
     start_clicked = pyqtSignal(str)      # 开始按钮点击
@@ -21,7 +70,9 @@ class TimerCard(QFrame):
     delete_clicked = pyqtSignal(str)     # 删除按钮点击
     reset_clicked = pyqtSignal(str)      # 重置按钮点击
     drag_started = pyqtSignal(str)       # 拖拽开始
+    drag_finished = pyqtSignal(str)      # 拖拽结束
     reorder_requested = pyqtSignal(int, int)  # 重新排序请求 (old_index, new_index)
+    drag_over_card = pyqtSignal(int)     # 拖拽悬停在卡片上，传递目标索引
     
     def __init__(self, timer: Timer, index: int = 0, parent=None):
         """初始化卡片"""
@@ -32,9 +83,16 @@ class TimerCard(QFrame):
         # 拖拽相关
         self._drag_start_pos = None
         self._is_dragging = False
+        self._is_dragging_active = False  # 是否正在被拖拽（浮起状态）
+        self._drag_in_progress = False  # 是否正在执行拖拽操作（防止重复emit）
+        
+        # 动画相关
+        self._shadow_effect = None
+        self._original_geometry = None
         
         self.setAcceptDrops(True)
         self._setup_ui()
+        self._setup_shadow()
         self._update_display()
     
     @property
@@ -51,6 +109,14 @@ class TimerCard(QFrame):
     def index(self, value: int):
         """设置卡片索引"""
         self._index = value
+    
+    def _setup_shadow(self):
+        """设置阴影效果"""
+        self._shadow_effect = QGraphicsDropShadowEffect()
+        self._shadow_effect.setBlurRadius(0)
+        self._shadow_effect.setColor(QColor(0, 0, 0, 0))
+        self._shadow_effect.setOffset(0, 0)
+        self.setGraphicsEffect(self._shadow_effect)
     
     def _setup_ui(self):
         """设置UI布局"""
@@ -167,7 +233,6 @@ class TimerCard(QFrame):
         radius = 12
         
         # 创建圆角路径
-        from PyQt6.QtGui import QPainterPath
         path = QPainterPath()
         path.addRoundedRect(rect.x(), rect.y(), rect.width(), rect.height(), radius, radius)
         painter.setClipPath(path)
@@ -186,9 +251,9 @@ class TimerCard(QFrame):
         painter.setPen(QPen(QColor(0, 0, 0, 30), 1))
         painter.drawRoundedRect(rect.x(), rect.y(), rect.width() - 1, rect.height() - 1, radius, radius)
         
-        # 如果正在拖拽，添加半透明效果
-        if self._is_dragging:
-            painter.fillRect(rect, QColor(255, 255, 255, 100))
+        # 如果正在被拖拽，添加半透明遮罩
+        if self._is_dragging_active:
+            painter.fillRect(rect, QColor(255, 255, 255, 150))
     
     def _update_display(self):
         """更新显示"""
@@ -286,6 +351,34 @@ class TimerCard(QFrame):
         self._update_display()
         self.update()
     
+    def set_dragging_active(self, active: bool):
+        """
+        设置拖拽激活状态（浮起效果）
+        
+        Args:
+            active: True 表示正在被拖拽，显示浮起效果
+        """
+        self._is_dragging_active = active
+        
+        if active:
+            # 浮起效果 - 增加阴影
+            self._animate_shadow(20, 10, QColor(0, 0, 0, 100))
+        else:
+            # 恢复正常
+            self._animate_shadow(0, 0, QColor(0, 0, 0, 0))
+        
+        self.update()
+    
+    def _animate_shadow(self, blur: int, offset: int, color: QColor):
+        """动画过渡阴影效果"""
+        if not self._shadow_effect:
+            return
+        
+        # 简化：直接设置阴影
+        self._shadow_effect.setBlurRadius(blur)
+        self._shadow_effect.setOffset(0, offset)
+        self._shadow_effect.setColor(color)
+    
     # ========== 拖拽功能 ==========
     
     def mousePressEvent(self, event):
@@ -311,44 +404,105 @@ class TimerCard(QFrame):
     def mouseReleaseEvent(self, event):
         """鼠标释放事件"""
         self._drag_start_pos = None
+        # 如果拖拽正在进行中，不要在这里处理，让_start_drag处理
+        if self._drag_in_progress:
+            super().mouseReleaseEvent(event)
+            return
+        
+        # 没有拖拽操作，只是普通点击
         self._is_dragging = False
-        self.update()
+        self.set_dragging_active(False)
         super().mouseReleaseEvent(event)
     
     def _start_drag(self):
         """开始拖拽"""
         self._is_dragging = True
-        self.update()
+        self._is_dragging_active = True
+        self._drag_in_progress = True
+        self.set_dragging_active(True)
         
         # 创建拖拽对象
         drag = QDrag(self)
         mime_data = QMimeData()
         mime_data.setText(self._timer.id)
         mime_data.setData("application/x-timer-index", str(self._index).encode())
+        mime_data.setData("application/x-timer-color", self._timer.color.encode())
         drag.setMimeData(mime_data)
         
-        # 创建拖拽预览图
-        pixmap = self.grab()
-        drag.setPixmap(pixmap)
+        # 创建简单的半透明拖拽预览（不显示内容，只是一个色块）
+        preview_size = QSize(self.width(), self.height())
+        preview_pixmap = QPixmap(preview_size)
+        preview_pixmap.fill(Qt.GlobalColor.transparent)
+        
+        painter = QPainter(preview_pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # 获取卡片颜色
+        normal_color, _ = self._get_colors()
+        normal_color.setAlpha(100)  # 半透明
+        
+        # 绘制圆角矩形
+        painter.setBrush(QBrush(normal_color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(0, 0, preview_size.width(), preview_size.height(), 12, 12)
+        
+        # 绘制虚线边框
+        pen = QPen(QColor(0, 0, 0, 80))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(1, 1, preview_size.width() - 2, preview_size.height() - 2, 12, 12)
+        
+        painter.end()
+        
+        drag.setPixmap(preview_pixmap)
         drag.setHotSpot(self._drag_start_pos)
+        
+        # 隐藏原始卡片
+        self.hide()
         
         # 发送拖拽开始信号
         self.drag_started.emit(self._timer.id)
         
         # 执行拖拽
-        drag.exec(Qt.DropAction.MoveAction)
+        result = drag.exec(Qt.DropAction.MoveAction)
+        
+        # 先发送拖拽结束信号，让主窗口处理重新排序
+        # 这会在主窗口中触发 _refresh_timer_cards，删除所有旧卡片
+        self._is_dragging = False
+        self._is_dragging_active = False
+        self._drag_in_progress = False
+        self.drag_finished.emit(self._timer.id)
+        
+        # 拖拽结束后恢复状态（如果卡片还没被删除的话）
+        self.show()
+        self.set_dragging_active(False)
     
     def dragEnterEvent(self, event):
         """拖拽进入事件"""
         if event.mimeData().hasFormat("application/x-timer-index"):
-            event.acceptProposedAction()
+            # 检查是否是自己的拖拽（被隐藏的卡片）
+            data = event.mimeData().data("application/x-timer-index")
+            source_index = int(bytes(data).decode())
+            if source_index != self._index:
+                event.acceptProposedAction()
+                # 发送信号通知主窗口更新占位符位置
+                self.drag_over_card.emit(self._index)
+            else:
+                event.ignore()
         else:
             event.ignore()
     
     def dragMoveEvent(self, event):
         """拖拽移动事件"""
         if event.mimeData().hasFormat("application/x-timer-index"):
-            event.acceptProposedAction()
+            data = event.mimeData().data("application/x-timer-index")
+            source_index = int(bytes(data).decode())
+            if source_index != self._index:
+                event.acceptProposedAction()
+            else:
+                event.ignore()
         else:
             event.ignore()
     
