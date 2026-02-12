@@ -185,26 +185,38 @@ class TimerManager:
         重新排序倒计时
         
         Args:
-            old_index: 原始位置
-            new_index: 新位置
+            old_index: 原始位置（基于position排序后的索引）
+            new_index: 新位置（基于position排序后的索引）
             
         Returns:
             是否排序成功
         """
-        if old_index < 0 or old_index >= len(self._timers):
-            return False
-        if new_index < 0 or new_index >= len(self._timers):
+        print(f"[DEBUG TimerManager] reorder_timers: old={old_index}, new={new_index}")
+        
+        if old_index < 0 or new_index < 0:
             return False
         if old_index == new_index:
             return False
         
-        # 移动倒计时
-        timer = self._timers.pop(old_index)
-        self._timers.insert(new_index, timer)
+        # 先按position排序获取排序后的列表
+        sorted_timers = sorted(self._timers, key=lambda t: t.position)
+        print(f"[DEBUG TimerManager] Before: {[(t.name, t.position) for t in sorted_timers]}")
         
-        # 更新所有位置
-        for i, t in enumerate(self._timers):
-            t.position = i
+        if old_index >= len(sorted_timers) or new_index >= len(sorted_timers):
+            return False
+        
+        # 直接重新分配所有position值
+        # 先移除要移动的元素
+        timer_to_move = sorted_timers.pop(old_index)
+        print(f"[DEBUG TimerManager] Moving: {timer_to_move.name}")
+        # 插入到新位置
+        sorted_timers.insert(new_index, timer_to_move)
+        
+        # 重新分配所有position
+        for i, timer in enumerate(sorted_timers):
+            timer.position = i
+        
+        print(f"[DEBUG TimerManager] After: {[(t.name, t.position) for t in sorted_timers]}")
         
         self._notify_timers_changed()
         return True
